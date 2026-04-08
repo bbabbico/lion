@@ -1,5 +1,5 @@
 const API_BASE = 'http://localhost:3000';
-const POLL_INTERVAL_MS = 2000;
+const POLL_INTERVAL_MS = 1800;
 
 async function postJob(payload) {
   const response = await fetch(`${API_BASE}/jobs`, {
@@ -9,8 +9,7 @@ async function postJob(payload) {
   });
 
   if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`서버 오류(${response.status}): ${text}`);
+    throw new Error(`작업 생성 실패: ${response.status} ${await response.text()}`);
   }
 
   return response.json();
@@ -19,45 +18,39 @@ async function postJob(payload) {
 async function getJob(jobId) {
   const response = await fetch(`${API_BASE}/jobs/${jobId}`);
   if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`작업 조회 실패(${response.status}): ${text}`);
+    throw new Error(`작업 조회 실패: ${response.status} ${await response.text()}`);
   }
   return response.json();
 }
 
 async function sendToActiveTab(message) {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!tab?.id) {
-    return;
+  if (tab?.id) {
+    await chrome.tabs.sendMessage(tab.id, message);
   }
-  await chrome.tabs.sendMessage(tab.id, message);
 }
 
-async function watchJob(jobId) {
+function watchJob(jobId) {
   const timer = setInterval(async () => {
     try {
       const job = await getJob(jobId);
-
       if (job.status === 'done') {
         clearInterval(timer);
         await sendToActiveTab({ action: 'APPLY_SERVER_ACTIONS', payload: job.result });
       }
-
       if (job.status === 'failed') {
         clearInterval(timer);
-        console.error('작업 실패:', job.error);
+        console.error('[Lion] 작업 실패', job.error);
       }
     } catch (error) {
       clearInterval(timer);
-      console.error('작업 폴링 실패:', error);
+      console.error('[Lion] 폴링 실패', error);
     }
   }, POLL_INTERVAL_MS);
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message.action !== 'START_ANALYSIS') {
-    return;
-  }
+  if (message.action !== 'START_ANALYSIS') return;
 
   (async () => {
     try {
@@ -66,12 +59,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       await sendToActiveTab({
         action: 'START_LOCAL_SCAN',
         payload: {
-          burstCount: message.payload?.options?.localBurstCount ?? 4
+          burstCount: message.payload?.options?.localBurstCount ?? 8
         }
       });
 
       watchJob(created.jobId);
-
       sendResponse({ ok: true, jobId: created.jobId });
     } catch (error) {
       sendResponse({ ok: false, error: error.message });

@@ -3,12 +3,28 @@ const crypto = require('crypto');
 const { chromium } = require('playwright');
 
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: '1mb' }));
 
 const jobs = new Map();
+const proxyEventsByUrl = new Map();
+const PROXY_SERVER = process.env.LION_PROXY || 'http://127.0.0.1:8080';
 
 function nowIso() {
   return new Date().toISOString();
+}
+
+function pushProxyEvent(url, event) {
+  const key = String(url || '');
+  const list = proxyEventsByUrl.get(key) || [];
+  list.push({ ...event, receivedAt: nowIso() });
+  proxyEventsByUrl.set(key, list.slice(-100));
+}
+
+function consumeProxyEvents(url) {
+  const key = String(url || '');
+  const list = proxyEventsByUrl.get(key) || [];
+  proxyEventsByUrl.delete(key);
+  return list;
 }
 
 function createJob(url, options) {
@@ -17,7 +33,8 @@ function createJob(url, options) {
     jobId,
     url,
     options: {
-      maxActions: Math.min(Math.max(options?.maxActions ?? 20, 1), 50)
+      maxActions: Math.min(Math.max(Number(options?.maxActions ?? 25), 1), 80),
+      allowProxyEvents: Boolean(options?.allowProxyEvents)
     },
     status: 'queued',
     createdAt: nowIso(),
@@ -29,19 +46,21 @@ function createJob(url, options) {
   return job;
 }
 
+
 async function analyzeUrl(job) {
   job.status = 'running';
   job.updatedAt = nowIso();
 
-  const browser = await chromium.launch({ headless: true });
+  const browser = await chromium.launch({
+    headless: true,
+    proxy: { server: PROXY_SERVER }
+  });
   const context = await browser.newContext();
   const page = await context.newPage();
 
-  const navigations = [];
+  const navChain = [];
   page.on('framenavigated', (frame) => {
-    if (frame === page.mainFrame()) {
-      navigations.push(frame.url());
-    }
+    if (frame === page.mainFrame()) navChain.push(frame.url());
   });
 
   await page.addInitScript(() => {
@@ -50,101 +69,121 @@ async function analyzeUrl(job) {
     const rawAdd = EventTarget.prototype.addEventListener;
     EventTarget.prototype.addEventListener = function patched(type, listener, options) {
       try {
-        const tag = this.tagName ? this.tagName.toLowerCase() : 'unknown';
-        window.__lionEventLog.push({ type, tag });
+        const targetTag = this.tagName ? this.tagName.toLowerCase() : 'unknown';
+        window.__lionEventLog.push({ type, targetTag, ts: Date.now() });
       } catch (_) {
-        // ignore logging error
+        // ignore
       }
       return rawAdd.call(this, type, listener, options);
     };
   });
 
   try {
-    await page.goto(job.url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-    await page.waitForTimeout(1500);
+    await page.goto(job.url, { waitUntil: 'domcontentloaded', timeout: 45000 });
+    await page.waitForTimeout(1400);
 
-    const discovered = await page.evaluate(() => {
-      const nodes = Array.from(document.querySelectorAll('a[href], button, input[type="submit"], input[type="button"]'));
-
-      const visible = nodes.filter((node) => {
-        const rect = node.getBoundingClientRect();
-        const style = window.getComputedStyle(node);
-        return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
-      });
-
-      const normalized = visible.slice(0, 120).map((node) => {
+    const discovered = await page.evaluate((maxActions) => {
+      const buildSelector = (node) => {
         const tag = node.tagName.toLowerCase();
-        const idPart = node.id ? `#${CSS.escape(node.id)}` : '';
-        const href = tag === 'a' ? node.getAttribute('href') || '' : '';
-        const name = node.getAttribute('name') || '';
-        const className = (node.className || '').toString().trim().split(/\s+/).slice(0, 2).map((c) => `.${CSS.escape(c)}`).join('');
-        const selector = idPart ? `${tag}${idPart}` : `${tag}${className}`;
+        if (node.id) return `${tag}#${CSS.escape(node.id)}`;
+        const cls = (node.className || "").toString().trim().split(/\s+/).filter(Boolean).slice(0, 2);
+        if (cls.length) return `${tag}${cls.map((c) => `.${CSS.escape(c)}`).join("")}`;
+        return tag;
+      };
+      const visible = (el) => {
+        const rect = el.getBoundingClientRect();
+        const style = window.getComputedStyle(el);
+        return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+      };
 
-        return {
-          selector,
-          tag,
-          href,
-          name,
-          text: (node.textContent || '').trim().slice(0, 80)
-        };
-      });
+      const clickable = Array.from(document.querySelectorAll('a[href], button, [role="button"], input[type="submit"], input[type="button"], [aria-haspopup="menu"]'))
+        .filter(visible)
+        .slice(0, maxActions)
+        .map((node) => ({
+          type: 'click',
+          selector: buildSelector(node),
+          tag: node.tagName.toLowerCase(),
+          href: node.tagName.toLowerCase() === 'a' ? (node.getAttribute('href') || '') : ''
+        }));
 
-      const eventLog = Array.isArray(window.__lionEventLog) ? window.__lionEventLog.slice(0, 250) : [];
-      return { normalized, eventLog };
-    });
+      const fillable = Array.from(document.querySelectorAll('input[type="text"], input[type="search"], input[type="email"], textarea'))
+        .filter(visible)
+        .slice(0, Math.ceil(maxActions / 2))
+        .map((node) => ({
+          type: 'fill',
+          selector: buildSelector(node),
+          value: `srv_${Math.random().toString(36).slice(2, 8)}`
+        }));
 
-    const safeCandidates = discovered.normalized.filter((item) => {
-      if (!item.selector) return false;
-      if (item.tag === 'a') {
-        return !/^javascript:/i.test(item.href);
-      }
-      return item.tag === 'button' || item.tag === 'input';
-    });
+      const eventLog = Array.isArray(window.__lionEventLog) ? window.__lionEventLog.slice(0, 300) : [];
+      return { clickable, fillable, eventLog };
+    }, job.options.maxActions);
 
     const executedActions = [];
-    const maxActions = Math.min(job.options.maxActions, safeCandidates.length);
+    const candidates = [...discovered.clickable, ...discovered.fillable].slice(0, job.options.maxActions);
 
-    for (let i = 0; i < maxActions; i += 1) {
-      const target = safeCandidates[i];
+    for (const action of candidates) {
       try {
-        const clicked = await page.evaluate((selector) => {
-          const el = document.querySelector(selector);
-          if (!el) return false;
+        if (action.type === 'click') {
+          const clicked = await page.evaluate((selector) => {
+            const el = document.querySelector(selector);
+            if (!el) return false;
+            if (el.tagName.toLowerCase() === 'a') {
+              const href = el.getAttribute('href') || '';
+              if (/^javascript:/i.test(href)) return false;
+              el.setAttribute('target', '_blank');
+            }
+            el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+            return true;
+          }, action.selector);
+          if (clicked) executedActions.push(action);
+        }
 
-          if (el.tagName.toLowerCase() === 'a') {
-            el.setAttribute('target', '_blank');
-          }
-
-          el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
-          return true;
-        }, target.selector);
-
-        if (clicked) {
-          executedActions.push({
-            selector: target.selector,
-            type: 'click',
-            tag: target.tag
-          });
+        if (action.type === 'fill') {
+          const filled = await page.evaluate(({ selector, value }) => {
+            const el = document.querySelector(selector);
+            if (!el) return false;
+            el.focus();
+            el.value = value;
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+            return true;
+          }, action);
+          if (filled) executedActions.push(action);
         }
       } catch (_) {
-        // keep running on individual action errors
+        // keep going
       }
     }
 
+    const proxyEvents = job.options.allowProxyEvents ? consumeProxyEvents(job.url) : [];
+    const proxyActions = proxyEvents
+      .flatMap((evt) => {
+        if (evt.selector) {
+          return [{ type: 'click', selector: evt.selector, source: 'proxy' }];
+        }
+        if (evt.redirectUrl && /^https?:\/\//i.test(evt.redirectUrl)) {
+          return [{ type: 'navigate', url: evt.redirectUrl, source: 'proxy' }];
+        }
+        return [];
+      })
+      .slice(0, 20);
+
     job.result = {
       analyzedUrl: job.url,
-      navigationChain: [...new Set(navigations)],
-      discoveredCount: safeCandidates.length,
-      executedActions,
-      sampledEvents: discovered.eventLog
+      discoveredCount: candidates.length,
+      executedActions: [...executedActions, ...proxyActions],
+      navigationChain: [...new Set(navChain)],
+      sampledEvents: discovered.eventLog,
+      proxyEvents
     };
 
     job.status = 'done';
     job.updatedAt = nowIso();
   } catch (error) {
     job.status = 'failed';
-    job.updatedAt = nowIso();
     job.error = error.message;
+    job.updatedAt = nowIso();
   } finally {
     await context.close();
     await browser.close();
@@ -153,7 +192,6 @@ async function analyzeUrl(job) {
 
 app.post('/jobs', (req, res) => {
   const { url, options } = req.body || {};
-
   if (!url || typeof url !== 'string') {
     return res.status(400).json({ error: 'url은 필수 문자열입니다.' });
   }
@@ -169,38 +207,34 @@ app.post('/jobs', (req, res) => {
     return res.status(400).json({ error: 'http/https URL만 지원합니다.' });
   }
 
-  const job = createJob(parsed.toString(), options);
+  const job = createJob(parsed.toString(), options || {});
   analyzeUrl(job).catch((error) => {
     job.status = 'failed';
     job.updatedAt = nowIso();
     job.error = error.message;
   });
 
-  return res.status(202).json({
-    jobId: job.jobId,
-    status: job.status
-  });
+  return res.status(202).json({ jobId: job.jobId, status: job.status });
 });
 
 app.get('/jobs/:jobId', (req, res) => {
   const job = jobs.get(req.params.jobId);
-  if (!job) {
-    return res.status(404).json({ error: '작업을 찾을 수 없습니다.' });
+  if (!job) return res.status(404).json({ error: '작업을 찾을 수 없습니다.' });
+  return res.json(job);
+});
+
+app.post('/proxy/events', (req, res) => {
+  const { url, eventType, selector, redirectUrl, note } = req.body || {};
+  if (!url || !eventType) {
+    return res.status(400).json({ error: 'url,eventType 필수' });
   }
 
-  return res.json({
-    jobId: job.jobId,
-    url: job.url,
-    status: job.status,
-    createdAt: job.createdAt,
-    updatedAt: job.updatedAt,
-    result: job.result,
-    error: job.error
-  });
+  pushProxyEvent(url, { eventType, selector, redirectUrl, note });
+  return res.json({ ok: true });
 });
 
 app.get('/health', (_, res) => {
-  res.json({ ok: true, service: 'lion-server', time: nowIso() });
+  res.json({ ok: true, service: 'lion-server', proxy: PROXY_SERVER, time: nowIso() });
 });
 
 const PORT = process.env.PORT || 3000;

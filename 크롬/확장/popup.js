@@ -17,8 +17,9 @@ runBtn.addEventListener('click', async () => {
       payload: {
         url: tab.url,
         options: {
-          maxActions: 20,
-          localBurstCount: 4
+          maxActions: 35,
+          localBurstCount: 8,
+          allowProxyEvents: true
         }
       }
     });
@@ -27,7 +28,7 @@ runBtn.addEventListener('click', async () => {
       throw new Error(response?.error || '작업 시작 실패');
     }
 
-    statusEl.textContent = `작업 생성됨: ${response.jobId}\n로컬 탐색 + 서버 분석 진행 중`; 
+    statusEl.textContent = `작업 생성됨: ${response.jobId}\n로컬 실행 + 서버/프록시 분석 진행 중`;
   } catch (error) {
     statusEl.textContent = `오류: ${error.message}`;
   } finally {
