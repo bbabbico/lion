@@ -79,6 +79,11 @@ function randomPick(items) {
   return items[Math.floor(Math.random() * items.length)];
 }
 
+function openUrlInNewWindow(url) {
+  if (!url || typeof url !== 'string') return;
+  window.open(url, '_blank', 'popup=yes,noopener,noreferrer,width=1280,height=900');
+}
+
 function markElement(target, color) {
   const old = target.style.outline;
   target.style.outline = `3px solid ${color}`;
@@ -93,7 +98,9 @@ function clickRandom() {
   if (!target) return;
 
   if (target.tagName.toLowerCase() === 'a') {
-    target.setAttribute('target', '_blank');
+    markElement(target, '#ef4444');
+    openUrlInNewWindow(target.href || target.getAttribute('href'));
+    return;
   }
 
   markElement(target, '#ef4444');
@@ -147,7 +154,7 @@ function applyServerActions(actions) {
     setTimeout(() => {
       try {
         if (action.type === 'navigate' && action.url) {
-          window.open(action.url, '_blank', 'noopener,noreferrer');
+          openUrlInNewWindow(action.url);
           return;
         }
 
@@ -157,7 +164,9 @@ function applyServerActions(actions) {
 
         if (action.type === 'click') {
           if (el.tagName.toLowerCase() === 'a') {
-            el.setAttribute('target', '_blank');
+            markElement(el, '#2563eb');
+            openUrlInNewWindow(el.href || el.getAttribute('href'));
+            return;
           }
           markElement(el, '#2563eb');
           el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
