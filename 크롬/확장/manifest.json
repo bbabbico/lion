@@ -1,0 +1,21 @@
+{
+  "manifest_version": 3,
+  "name": "Proxy Random Trigger",
+  "version": "1.0",
+  "description": "백엔드 신호를 받아 무작위 이벤트를 실행합니다.",
+  "action": {
+    "default_popup": "popup.html"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"]
+    }
+  ],
+  "permissions": [
+    "activeTab"
+  ]
+}
