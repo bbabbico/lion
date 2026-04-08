@@ -5,7 +5,12 @@
 - 사용가능한 input 안에 정해놓은 50가지 문구 중 하나를 써 넣음. (server.js/INPUT_TEST_PHRASES 함수에 문구 있음)
 
 
+
+## Start
+
+### 필요 패키지 설치
 `npm install express playwright`
 
+### 서버 실행
 - 크롬/server 경로에서 node 서버 실행 후 크롬 확장프로그램 이용.
 - `node server.js`
