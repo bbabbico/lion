@@ -3,7 +3,7 @@
 ## 현재 까지 구현된것
 - 요구사항 기반으로 완성.
 - 숨겨진 함수 이벤트가 실행되도 거의 무반응
-- FUNCTIONS TO TARGET 으로 실행될 함수 개수 입
+- FUNCTIONS TO TARGET 으로 실행될 함수 개수 입력 (20이상 입력추천)
 - 🔥 BLAST IT 🔥 으로 실행
 
 ## Start
